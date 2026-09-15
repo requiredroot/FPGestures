@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">FPGestures</string>
+    <string name="checking_root">Checking root access…</string>
+    <string name="root_ok">Root granted — gesture listener ready.</string>
+    <string name="no_root">No root access. FPGestures requires root (su) and will not start.</string>
+    <string name="enable_service">Enable gesture service</string>
+    <string name="service_running">Gesture service running — tap to stop</string>
+    <string name="notif_channel">Gesture listener</string>
+    <string name="notif_title">FPGestures listening</string>
+    <string name="notif_text">Fingerprint gestures active</string>
+</resources>
