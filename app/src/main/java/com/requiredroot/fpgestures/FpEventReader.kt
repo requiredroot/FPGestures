@@ -25,6 +25,18 @@ class FpEventReader(
         private const val TAG = "FpEventReader"
         const val DEVICE_NAME = "uinput-goodix"
 
+        /** Latest human-readable diagnostic (device missing, parse issue…). */
+        @Volatile var lastError: String? = null
+            private set
+        /** /dev/input/eventN currently streamed, null when idle. */
+        @Volatile var activeDevice: String? = null
+            private set
+        /** Epoch ms of the last parsed gesture DOWN, 0 = none yet. */
+        @Volatile var lastEventMs: Long = 0
+            private set
+
+        fun noteEvent() { lastEventMs = System.currentTimeMillis() }
+
         // getevent key labels -> gesture keys.
         private val KEY_TO_GESTURE = mapOf(
             "KEY_DOWN" to GesturePrefs.KEY_SWIPE_DOWN,
@@ -49,17 +61,33 @@ class FpEventReader(
         val r = RootShell.run("getevent -p")
         if (!r.ok) {
             Log.w(TAG, "getevent -p failed: ${r.stderr}")
+            lastError = "getevent -p failed: ${r.stderr.ifEmpty { "no output" }}"
+            return null
+        }
+        if (r.stdout.isBlank()) {
+            Log.w(TAG, "getevent -p empty; getevent missing from PATH?")
+            lastError = "getevent -p returned empty output"
             return null
         }
         var currentDev: String? = null
+        var seenAnyName = false
         for (line in r.stdout.lines()) {
             val t = line.trim()
             if (t.startsWith("/dev/input/event")) {
                 currentDev = t.removeSuffix(":")
             } else if (t.startsWith("name:")) {
+                seenAnyName = true
                 val name = t.removePrefix("name:").trim().removeSurrounding("\"")
-                if (name == DEVICE_NAME) return currentDev
+                if (name == DEVICE_NAME) {
+                    lastError = null
+                    return currentDev
+                }
             }
+        }
+        lastError = if (!seenAnyName) {
+            "could not parse getevent -p output (format unexpected)"
+        } else {
+            "$DEVICE_NAME not present; HAL may not expose nav events"
         }
         return null
     }
@@ -79,7 +107,9 @@ class FpEventReader(
                 }
                 backoffMs = 1000L
                 Log.i(TAG, "listening on $dev")
+                activeDevice = dev
                 streamDevice(dev)
+                activeDevice = null
                 // streamDevice returns on error/disconnect; loop and re-resolve.
                 if (running) sleepQuiet(2000)
             }
@@ -88,6 +118,7 @@ class FpEventReader(
 
     fun stop() {
         running = false
+        activeDevice = null
         try { proc?.destroyForcibly() } catch (_: Exception) { }
         thread?.interrupt()
         thread = null
@@ -101,9 +132,11 @@ class FpEventReader(
             proc = p
             p.outputStream.close()
             val reader = p.inputStream.bufferedReader()
-            while (running) {
-                val line = try { reader.readLine() } catch (_: Exception) { null } ?: break
-                parseLine(line)?.let { gesture ->
+            var line: String?
+            while (running && reader.readLine().also { line = it } != null) {
+                val gesture = parseLine(line!!)
+                if (gesture != null) {
+                    noteEvent()
                     try { listener(gesture) } catch (e: Exception) {
                         Log.w(TAG, "listener failed: ${e.message}")
                     }

@@ -27,7 +27,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var statusView: TextView
     private lateinit var toggleView: Switch
     private lateinit var rowsContainer: LinearLayout
+    private lateinit var diagView: TextView
     private var hasRoot: Boolean? = null
+    private var fpDevice: String? = null
+    private var fpError: String? = null
     private var serviceRunning = false
 
     private val stateReceiver = object : BroadcastReceiver() {
@@ -48,6 +51,10 @@ class MainActivity : AppCompatActivity() {
             textSize = 24f
         }
         statusView = TextView(this).apply { textSize = 16f }
+        diagView = TextView(this).apply {
+            textSize = 13f
+            setPadding(0, 8, 0, 8)
+        }
         toggleView = Switch(this).apply {
             text = getString(R.string.enable_service)
             setOnCheckedChangeListener { _, checked ->
@@ -73,6 +80,7 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(title)
         root.addView(statusView)
+        root.addView(diagView)
         root.addView(toggleView)
         root.addView(rowsContainer)
         setContentView(root)
@@ -90,6 +98,7 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         refreshUi()
+        refreshDiagLive()
     }
 
     override fun onDestroy() {
@@ -129,10 +138,24 @@ class MainActivity : AppCompatActivity() {
 
     private fun checkRootAsync() {
         statusView.text = getString(R.string.checking_root)
+        diagView.text = ""
         Thread({
             val ok = RootShell.hasRoot()
+            var dev: String? = null
+            var devErr: String? = null
+            if (ok) {
+                // Probe the input device with a short-lived reader so the
+                // user sees immediately whether gestures can work at all.
+                val probe = FpEventReader {}
+                dev = try { probe.findDevice() } catch (e: Exception) { null }
+                devErr = FpEventReader.lastError
+            }
+            val foundDev = dev
+            val foundErr = devErr
             runOnUiThread {
                 hasRoot = ok
+                fpDevice = foundDev
+                fpError = foundErr
                 if (!ok) {
                     toggleView.isChecked = false
                     GesturePrefs.setEnabled(this, false)
@@ -149,6 +172,10 @@ class MainActivity : AppCompatActivity() {
             ok -> getString(R.string.root_ok)
             else -> getString(R.string.no_root)
         }
+            ok == null -> android.R.color.darker_gray
+            ok -> android.R.color.holo_green_dark
+            else -> android.R.color.holo_red_dark
+        }
         val color = when {
             ok == null -> android.R.color.darker_gray
             ok -> android.R.color.holo_green_dark
@@ -161,6 +188,25 @@ class MainActivity : AppCompatActivity() {
             getString(R.string.service_running)
         } else {
             getString(R.string.enable_service)
+        }
+        refreshDiagLive()
+    }
+
+    /** Live listener state: device node, last-event age, or the failure reason. */
+    private fun refreshDiagLive() {
+        val active = FpEventReader.activeDevice
+        val err = FpEventReader.lastError ?: fpError
+        val lastMs = FpEventReader.lastEventMs
+        diagView.text = when {
+            hasRoot != true -> ""
+            active != null && lastMs > 0 -> {
+                val ageS = (System.currentTimeMillis() - lastMs) / 1000
+                "Listening on $active — last gesture ${ageS}s ago."
+            }
+            active != null -> "Listening on $active — touch the sensor."
+            serviceRunning -> "Service on but no device yet. ${err ?: "searching…"}"
+            fpDevice != null -> "Sensor device: $fpDevice (idle)."
+            else -> "Sensor check: ${err ?: "not run yet."}"
         }
     }
 }
