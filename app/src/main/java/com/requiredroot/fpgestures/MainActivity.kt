@@ -193,6 +193,7 @@ class MainActivity : AppCompatActivity() {
         val active = FpEventReader.activeDevice
         val err = FpEventReader.lastError ?: fpError
         val lastMs = FpEventReader.lastEventMs
+        val devices = FpEventReader.lastDeviceList
         diagView.text = when {
             hasRoot != true -> ""
             active != null && lastMs > 0 -> {
@@ -200,10 +201,15 @@ class MainActivity : AppCompatActivity() {
                 "Listening on $active — last gesture ${ageS}s ago."
             }
             active != null -> "Listening on $active — touch the sensor."
-            serviceRunning -> "Service on but no device yet. ${err ?: "searching…"}"
+            serviceRunning && devices.isNotEmpty() ->
+                "Devices seen: " + devices.joinToString(", ") { it.second }.take(200)
+            serviceRunning -> "Service on. ${err ?: "searching…"}"
             fpDevice != null -> "Sensor device: $fpDevice (idle)."
             else -> "Sensor check: ${err ?: "not run yet."}"
         }
+        if (err != null && devices.isEmpty()) {
+            diagView.append("\n\nDetails: $err")
+        }
     }
-}
 
+}

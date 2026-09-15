@@ -21,21 +21,35 @@ import android.util.Log
 class FpEventReader(
     private val listener: (gesture: String) -> Unit
 ) {
-    companion object {
+        companion object {
         private const val TAG = "FpEventReader"
         const val DEVICE_NAME = "uinput-goodix"
 
-        /** Latest human-readable diagnostic (device missing, parse issue…). */
+        /** Human-readable diagnostic from the last findDevice() pass. */
         @Volatile var lastError: String? = null
             private set
-        /** /dev/input/eventN currently streamed, null when idle. */
+        /** @dev/input/eventN currently streamed, null when idle. */
         @Volatile var activeDevice: String? = null
             private set
         /** Epoch ms of the last parsed gesture DOWN, 0 = none yet. */
         @Volatile var lastEventMs: Long = 0
             private set
+        /** Raw device table from the last getevent -p pass (for debugging). */
+        @Volatile var lastDeviceList: List<Pair<String, String>> = emptyList()
+            private set
 
         fun noteEvent() { lastEventMs = System.currentTimeMillis() }
+
+        // Candidate device name fragments emitted by common Goodix/FPC drivers
+        // on MediaTek (the exact "name:" string varies across vendor HALs).
+        private val NAME_FRAGMENTS = listOf(
+            "uinput-goodix", "goodix", "fpc", "fingerprint", "fp"
+        )
+
+        private fun isFingerprintDevice(name: String): Boolean {
+            val n = name.lowercase()
+            return NAME_FRAGMENTS.any { n.contains(it) }
+        }
 
         // getevent key labels -> gesture keys.
         private val KEY_TO_GESTURE = mapOf(
@@ -54,40 +68,42 @@ class FpEventReader(
     private var thread: Thread? = null
     private var proc: Process? = null
 
-    /** Resolve /dev/input/eventN for the Goodix device. Null if absent. */
+        /** Resolve /dev/input/eventN for the Goodix device. Null if absent. */
     fun findDevice(): String? {
-        // getevent -p lists every device with its name; the device line is
-        // followed by "  name: ..." within the same block.
         val r = RootShell.run("getevent -p")
         if (!r.ok) {
             Log.w(TAG, "getevent -p failed: ${r.stderr}")
             lastError = "getevent -p failed: ${r.stderr.ifEmpty { "no output" }}"
             return null
         }
-        if (r.stdout.isBlank()) {
-            Log.w(TAG, "getevent -p empty; getevent missing from PATH?")
-            lastError = "getevent -p returned empty output"
-            return null
-        }
+        // Scan ALL event devices; keep (node, name) pairs for diagnostics and
+        // match by common fingerprint-driver name fragments.
+        val found = mutableListOf<Pair<String, String>>()
         var currentDev: String? = null
-        var seenAnyName = false
+        var currentName: String? = null
         for (line in r.stdout.lines()) {
             val t = line.trim()
             if (t.startsWith("/dev/input/event")) {
                 currentDev = t.removeSuffix(":")
             } else if (t.startsWith("name:")) {
-                seenAnyName = true
                 val name = t.removePrefix("name:").trim().removeSurrounding("\"")
-                if (name == DEVICE_NAME) {
-                    lastError = null
-                    return currentDev
+                currentName = name
+                if (currentDev != null) {
+                    found.add(currentDev to name)
+                    if (isFingerprintDevice(name)) {
+                        lastDeviceList = found
+                        lastError = null
+                        return currentDev
+                    }
                 }
             }
         }
-        lastError = if (!seenAnyName) {
-            "could not parse getevent -p output (format unexpected)"
+        lastDeviceList = found
+        lastError = if (found.isEmpty()) {
+            "no input devices reported by getevent -p"
         } else {
-            "$DEVICE_NAME not present; HAL may not expose nav events"
+            "no fingerprint device found. Devices: " +
+                found.joinToString { it.second }.take(300)
         }
         return null
     }
