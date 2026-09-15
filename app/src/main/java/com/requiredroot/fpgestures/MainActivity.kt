@@ -172,10 +172,6 @@ class MainActivity : AppCompatActivity() {
             ok -> getString(R.string.root_ok)
             else -> getString(R.string.no_root)
         }
-            ok == null -> android.R.color.darker_gray
-            ok -> android.R.color.holo_green_dark
-            else -> android.R.color.holo_red_dark
-        }
         val color = when {
             ok == null -> android.R.color.darker_gray
             ok -> android.R.color.holo_green_dark
