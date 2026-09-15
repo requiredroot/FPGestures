@@ -9,7 +9,7 @@ on:
 
 jobs:
   build:
-    name: Build release APK
+    name: Build debug APK
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -40,15 +40,15 @@ jobs:
           restore-keys: |
             gradle-${{ runner.os }}-
 
-      - name: Build release APK
-        run: ./gradlew :app:assembleRelease --stacktrace
+      - name: Build debug APK
+        run: ./gradlew :app:assembleDebug --stacktrace
 
       - name: List APK outputs
         run: find app/build/outputs -name '*.apk' -exec ls -la {} \;
 
-      - name: Upload release APK
+      - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: fpgestures-release-apk
-          path: app/build/outputs/apk/release/*.apk
+          name: fpgestures-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
