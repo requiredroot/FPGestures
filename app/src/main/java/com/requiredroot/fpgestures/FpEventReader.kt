@@ -2,56 +2,31 @@ package com.requiredroot.fpgestures
 
 import android.util.Log
 
-/**
- * Finds the Goodix fingerprint input device and streams its key events
- * as root via `su -c getevent -lt`.
- *
- * The begonia Goodix driver registers an input device named "uinput-goodix"
- * and emits (gf_spi_tee.h):
- *   swipe down -> KEY_DOWN (108), swipe up -> KEY_UP (103),
- *   swipe left -> KEY_LEFT (105), swipe right -> KEY_RIGHT (106),
- *   click (tap) -> KEY_VOLUMEDOWN (114), double click -> KEY_VOLUMEUP (115),
- *   long press -> KEY_SEARCH (217), heavy press -> KEY_CHAT (299).
- *
- * getevent -lt prints lines like:
- *   [ 1234.567890] /dev/input/event3: EV_KEY  KEY_VOLUMEUP  DOWN
- * We parse key name + DOWN/UP and report DOWN transitions to [listener].
- * Runs on its own thread; call [stop] to kill the su session.
- */
 class FpEventReader(
     private val listener: (gesture: String) -> Unit
 ) {
-        companion object {
+    companion object {
         private const val TAG = "FpEventReader"
         const val DEVICE_NAME = "uinput-goodix"
 
-        /** Human-readable diagnostic from the last findDevice() pass. */
         @Volatile var lastError: String? = null
             private set
-        /** @dev/input/eventN currently streamed, null when idle. */
         @Volatile var activeDevice: String? = null
             private set
-        /** Epoch ms of the last parsed gesture DOWN, 0 = none yet. */
         @Volatile var lastEventMs: Long = 0
             private set
-        /** Raw device table from the last getevent -p pass (for debugging). */
         @Volatile var lastDeviceList: List<Pair<String, String>> = emptyList()
             private set
 
         fun noteEvent() { lastEventMs = System.currentTimeMillis() }
 
-        // Candidate device name fragments emitted by common Goodix/FPC drivers
-        // on MediaTek (the exact "name:" string varies across vendor HALs).
-        private val NAME_FRAGMENTS = listOf(
-            "uinput-goodix", "goodix", "fpc", "fingerprint", "fp"
-        )
+        private val NAME_FRAGMENTS = listOf("uinput-goodix", "goodix", "fpc", "fingerprint", "fp")
 
         private fun isFingerprintDevice(name: String): Boolean {
             val n = name.lowercase()
             return NAME_FRAGMENTS.any { n.contains(it) }
         }
 
-        // getevent key labels -> gesture keys.
         private val KEY_TO_GESTURE = mapOf(
             "KEY_DOWN" to GesturePrefs.KEY_SWIPE_DOWN,
             "KEY_UP" to GesturePrefs.KEY_SWIPE_UP,
@@ -68,27 +43,17 @@ class FpEventReader(
     private var thread: Thread? = null
     private var proc: Process? = null
 
-        /** Resolve /dev/input/eventN for the Goodix device. Null if absent. */
     fun findDevice(): String? {
-        val r = RootShell.run("getevent -p")
-        if (!r.ok) {
-            Log.w(TAG, "getevent -p failed: ${r.stderr}")
-            lastError = "getevent -p failed: ${r.stderr.ifEmpty { "no output" }}"
-            return null
-        }
-        // Scan ALL event devices; keep (node, name) pairs for diagnostics and
-        // match by common fingerprint-driver name fragments.
-        val found = mutableListOf<Pair<String, String>>()
-        var currentDev: String? = null
-        var currentName: String? = null
-        for (line in r.stdout.lines()) {
-            val t = line.trim()
-            if (t.startsWith("/dev/input/event")) {
-                currentDev = t.removeSuffix(":")
-            } else if (t.startsWith("name:")) {
-                val name = t.removePrefix("name:").trim().removeSurrounding("\"")
-                currentName = name
-                if (currentDev != null) {
+        val ge = RootShell.run("getevent -p")
+        if (ge.ok && ge.stdout.isNotBlank()) {
+            val found = mutableListOf<Pair<String, String>>()
+            var currentDev: String? = null
+            for (line in ge.stdout.lines()) {
+                val t = line.trim()
+                if (t.startsWith("/dev/input/event")) {
+                    currentDev = t.removeSuffix(":")
+                } else if (t.startsWith("name:") && currentDev != null) {
+                    val name = t.removePrefix("name:").trim().removeSurrounding("\"")
                     found.add(currentDev to name)
                     if (isFingerprintDevice(name)) {
                         lastDeviceList = found
@@ -97,14 +62,35 @@ class FpEventReader(
                     }
                 }
             }
+            lastDeviceList = found
+            lastError = if (found.isEmpty()) {
+                "no input devices reported by getevent -p"
+            } else {
+                "no fingerprint device. Devices: " + found.joinToString { it.second }.take(300)
+            }
+            return null
         }
-        lastDeviceList = found
-        lastError = if (found.isEmpty()) {
-            "no input devices reported by getevent -p"
-        } else {
-            "no fingerprint device found. Devices: " +
-                found.joinToString { it.second }.take(300)
+
+        val ls = RootShell.run("ls /dev/input/event*")
+        if (!ls.ok || ls.stdout.isBlank()) {
+            lastError = "getevent failed and no event nodes: ${ge.stderr}"
+            lastDeviceList = emptyList()
+            return null
         }
+        val found2 = mutableListOf<Pair<String, String>>()
+        for (node in ls.stdout.lines().map { it.trim() }.filter { it.startsWith("/dev/input/event") }) {
+            val num = node.removePrefix("/dev/input/event")
+            val nameR = RootShell.run("cat /sys/class/input/event$num/name 2>/dev/null; echo")
+            val name = nameR.stdout.trim()
+            found2.add(node to name)
+            if (isFingerprintDevice(name)) {
+                lastDeviceList = found2
+                lastError = null
+                return node
+            }
+        }
+        lastDeviceList = found2
+        lastError = "no fingerprint device in ${found2.size} nodes: " + found2.joinToString(", ") { it.second }.take(300)
         return null
     }
 
@@ -126,7 +112,6 @@ class FpEventReader(
                 activeDevice = dev
                 streamDevice(dev)
                 activeDevice = null
-                // streamDevice returns on error/disconnect; loop and re-resolve.
                 if (running) sleepQuiet(2000)
             }
         }, "FpEventReader").also { it.isDaemon = true; it.start() }
@@ -143,7 +128,6 @@ class FpEventReader(
     private fun streamDevice(dev: String) {
         var p: Process? = null
         try {
-            // -l labels, -t timestamps; DOWN transitions are what we map.
             p = Runtime.getRuntime().exec(arrayOf("su", "-c", "getevent -lt $dev"))
             proc = p
             p.outputStream.close()
@@ -167,9 +151,7 @@ class FpEventReader(
         }
     }
 
-    /** Returns the gesture key for DOWN transitions, else null. */
     internal fun parseLine(line: String): String? {
-        // Expect: "... EV_KEY  KEY_VOLUMEUP  DOWN"
         if (!line.contains("EV_KEY")) return null
         val parts = line.trim().split(Regex("\\s+"))
         if (parts.size < 2) return null
