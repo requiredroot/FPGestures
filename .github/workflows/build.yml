@@ -25,6 +25,8 @@ jobs:
 
       - name: Accept Android licenses and install platform
         run: |
+          export ANDROID_SDK_ROOT=/usr/local/lib/android/sdk
+          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
           yes | sdkmanager --licenses > /dev/null
           sdkmanager "platforms;android-34" "build-tools;34.0.0"
 
