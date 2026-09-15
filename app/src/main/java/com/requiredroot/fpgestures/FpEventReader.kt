@@ -101,9 +101,9 @@ class FpEventReader(
             proc = p
             p.outputStream.close()
             val reader = p.inputStream.bufferedReader()
-            var line: String?
-            while (running && reader.readLine().also { line = it } != null) {
-                parseLine(line!!)?.let { gesture ->
+            while (running) {
+                val line = try { reader.readLine() } catch (_: Exception) { null } ?: break
+                parseLine(line)?.let { gesture ->
                     try { listener(gesture) } catch (e: Exception) {
                         Log.w(TAG, "listener failed: ${e.message}")
                     }
