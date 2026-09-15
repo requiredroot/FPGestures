@@ -44,6 +44,15 @@ object Actions {
 
     val IDS: List<String> = ALL.map { it.first }
 
+    /** Toggles the begonia torch sysfs node (7 = on, 0 = off). */
+    private const val TORCH_SCRIPT =
+        "for p in /sys/class/leds/torch-light0/brightness " +
+        "/sys/devices/platform/flashlights_mt6360/torchbrightness; " +
+        "do if [ -w \$p ]; then " +
+        "v=\$(cat \$p 2>/dev/null | tr -dc 0-9); " +
+        "if [ \"\${v:-0}\" = 0 ]; then echo 7 > \$p; else echo 0 > \$p; fi; " +
+        "break; fi; done"
+
     /** Shell snippet executed as root for [actionId]. Empty = no-op. */
     fun commandFor(actionId: String): String = when (actionId) {
         BACK -> "input keyevent 4"
@@ -56,7 +65,7 @@ object Actions {
         PLAY_PAUSE -> "input keyevent 85"
         NEXT_TRACK -> "input keyevent 87"
         PREV_TRACK -> "input keyevent 88"
-        TORCH_TOGGLE -> "for p in /sys/class/leds/torch-light0/brightness /sys/devices/platform/flashlights_mt6360/torchbrightness; do [ -w \"$p\" ] && { v=$(cat \"$p\" 2>/dev/null | tr -dc 0-9); if [ \"${v:-0}\" = 0 ]; then echo 7 > \"$p\" 2>/dev/null; else echo 0 > \"$p\" 2>/dev/null; fi; break; }; done"
+        TORCH_TOGGLE -> TORCH_SCRIPT
         SCREEN_OFF -> "input keyevent 223"
         VOLUME_UP -> "input keyevent 24"
         VOLUME_DOWN -> "input keyevent 25"
