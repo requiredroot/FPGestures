@@ -62,15 +62,40 @@ class GestureService : Service() {
                 return START_NOT_STICKY
             }
             else -> {
-                if (!RootShell.hasRoot()) {
-                    Log.e(TAG, "root not available, refusing to start")
-                    broadcastState(false)
-                    stopSelf()
-                    return START_NOT_STICKY
+                // Foreground notification FIRST, synchronously — the system
+                // gives ~5s (ANR after ~10-20s on MIUI) before killing us.
+                try {
+                    startForegroundWithType()
+                } catch (e: Exception) {
+                    Log.e(TAG, "startForeground failed: ${e.message}")
+                    // Last resort: plain background start so at least we
+                    // don't crash; listener still works while app is alive.
+                    try {
+                        @Suppress("DEPRECATION")
+                        startForeground(NOTIF_ID, buildNotification())
+                    } catch (e2: Exception) {
+                        Log.e(TAG, "fallback foreground failed: ${e2.message}")
+                        broadcastState(false)
+                        stopSelf()
+                        return START_NOT_STICKY
+                    }
                 }
-                startForegroundWithType()
-                bringUp()
-                broadcastState(true)
+                // Root check + bring-up off the main thread: some su
+                // binaries (KernelSU/APatch prompts) block for user input.
+                Thread({
+                    if (!RootShell.hasRoot()) {
+                        Log.e(TAG, "root not available, stopping")
+                        mainLooper.let {
+                            android.os.Handler(it).post {
+                                broadcastState(false)
+                                stopSelf()
+                            }
+                        }
+                        return@Thread
+                    }
+                    bringUp()
+                    broadcastState(true)
+                }, "FpBringUp").also { it.isDaemon = true; it.start() }
                 return START_STICKY
             }
         }
@@ -78,12 +103,22 @@ class GestureService : Service() {
 
     private fun bringUp() {
         if (reader != null) return
-        val pm = getSystemService(POWER_SERVICE) as PowerManager
-        // PARTIAL_WAKE_LOCK keeps the CPU on so getevent keeps streaming
-        // while the screen is off; released in teardown().
-        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "FPGestures:reader")
-            .also { it.acquire(12 * 60 * 60 * 1000L) }
-        reader = FpEventReader { gesture -> onGesture(gesture) }.also { it.start() }
+        try {
+            val pm = getSystemService(POWER_SERVICE) as PowerManager
+            // PARTIAL_WAKE_LOCK keeps the CPU on so getevent keeps streaming
+            // while the screen is off; released in teardown(). Not fatal if
+            // the device denies it.
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "FPGestures:reader")
+                .also { it.acquire(12 * 60 * 60 * 1000L) }
+        } catch (e: Exception) {
+            Log.w(TAG, "wakelock acquire failed (non-fatal): ${e.message}")
+        }
+        try {
+            reader = FpEventReader { gesture -> onGesture(gesture) }.also { it.start() }
+        } catch (e: Exception) {
+            Log.e(TAG, "reader start failed: ${e.message}")
+            return
+        }
         Log.i(TAG, "gesture listener started")
     }
 
@@ -98,9 +133,19 @@ class GestureService : Service() {
     }
 
     private fun onGesture(gesture: String) {
-        if (!GesturePrefs.isEnabled(this)) return
-        val actionId = GesturePrefs.actionFor(this, gesture)
-        val cmd = Actions.commandFor(actionId)
+        val actionId = try {
+            if (!GesturePrefs.isEnabled(this)) return
+            GesturePrefs.actionFor(this, gesture)
+        } catch (e: Exception) {
+            Log.w(TAG, "prefs read failed: ${e.message}")
+            return
+        }
+        val cmd = try {
+            Actions.commandFor(actionId)
+        } catch (e: Exception) {
+            Log.w(TAG, "action lookup failed: ${e.message}")
+            return
+        }
         if (cmd.isEmpty()) return
         Log.i(TAG, "gesture=$gesture action=$actionId")
         Thread({

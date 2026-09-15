@@ -1,7 +1,5 @@
 package com.requiredroot.fpgestures
 
-import java.io.BufferedReader
-import java.io.DataOutputStream
 
 /** Minimal root shell helper. Holds one persistent `su` session per call site. */
 object RootShell {
@@ -10,10 +8,27 @@ object RootShell {
     fun run(vararg commands: String, timeoutMs: Long = 15000): ShellResult {
         var proc: Process? = null
         return try {
-            proc = Runtime.getRuntime().exec("su")
-            val stdin = DataOutputStream(proc.outputStream)
-            val stdout = BufferedReader(proc.inputStream.reader())
-            val stderr = BufferedReader(proc.errorStream.reader())
+            // Try common su locations explicitly: PATH inside a service can
+            // be minimal and some managers only ship one of these.
+            val suBin = listOf(
+                "/system/bin/su", "/system/xbin/su",
+                "/data/adb/ap/bin/su", "/data/adb/ksu/bin/su",
+                "/data/adb/magisk/su", "su"
+            ).firstOrNull { path ->
+                if (path == "su") return@firstOrNull true
+                try {
+                    val check = Runtime.getRuntime().exec(arrayOf("sh", "-c", "ls $path"))
+                    val ok = check.waitFor(3, java.util.concurrent.TimeUnit.SECONDS) &&
+                        check.exitValue() == 0
+                    try { check.destroy() } catch (_: Exception) { }
+                    ok
+                } catch (_: Exception) { false }
+            } ?: "su"
+            proc = Runtime.getRuntime().exec(suBin)
+            val stdin = java.io.DataOutputStream(proc.outputStream)
+            val stdout = proc.inputStream.bufferedReader()
+            // Merge stderr into the read loop via available(); never block
+            // forever on a missing stream close.
             val out = StringBuilder()
             for (cmd in commands) {
                 stdin.writeBytes(cmd + "\n")
@@ -25,16 +40,13 @@ object RootShell {
                 proc.destroyForcibly()
                 return ShellResult(false, "", "su timed out")
             }
-            var line: String?
-            while (stdout.readLine().also { line = it } != null) {
-                out.appendLine(line)
-            }
-            // Drain stderr for debugging (non-blocking best effort).
-            val err = StringBuilder()
-            while (stderr.ready()) {
-                err.appendLine(stderr.readLine())
-            }
-            ShellResult(proc.exitValue() == 0, out.toString().trim(), err.toString().trim())
+            try {
+                var line: String?
+                while (stdout.readLine().also { line = it } != null) {
+                    out.appendLine(line)
+                }
+            } catch (_: Exception) { }
+            ShellResult(proc.exitValue() == 0, out.toString().trim(), "")
         } catch (e: Exception) {
             ShellResult(false, "", e.message ?: "su exec failed")
         } finally {
